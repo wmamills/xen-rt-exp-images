@@ -1,0 +1,408 @@
+
+
+device_type: qemu
+job_name: nightly-builds-branch-main-test-qemu-6439790089
+timeouts:
+  job:
+    minutes: 60
+  action:
+    minutes: 60
+  connection:
+    minutes: 2
+priority: 25
+visibility: public
+context:
+  lava_test_results_dir: /var/lib/lava-%s
+  arch: aarch64
+  machine: virt,secure=on
+  cpu: cortex-a57
+  guestfs_interface: virtio
+  netdevice: user
+
+actions:
+
+- deploy:
+    to: downloads
+    timeout:
+      minutes: 60
+    images:
+      testexport:
+        url: https://gitlab.com/Linaro/blueprints/nightly-builds/-/jobs/6439790082/artifacts/raw/artifacts/testexport.tar.gz
+      os:
+        url: https://gitlab.com/Linaro/blueprints/nightly-builds/-/jobs/6439790082/artifacts/raw/images/trs-image-trs-qemuarm64.rootfs.wic.bz2
+        compression: bz2
+      firmware:
+        url: https://gitlab.com/Linaro/blueprints/nightly-builds/-/jobs/6439790058/artifacts/raw/images/flash.bin-qemu.gz
+        compression: gz
+    postprocess:
+      docker:
+        # provide qemu-img
+        image: registry.gitlab.com/linaro/blueprints/qemu-swtpm
+        steps:
+          # Add 10G, required by OpenAD Kit Demo container
+          - 'ls -hl trs-image-trs-qemuarm64.rootfs.wic'
+          - 'qemu-img resize trs-image-trs-qemuarm64.rootfs.wic +10G'
+          - 'ls -hl trs-image-trs-qemuarm64.rootfs.wic'
+
+- deploy:
+    timeout:
+      minutes: 60
+    to: tmpfs
+    images:
+      os:
+        image_arg: -drive id=disk1,file={os},if=none,format=raw -device virtio-blk-device,drive=disk1
+          -nographic -device i6300esb,id=watchdog0 -m 2048 -smp 4
+        url: downloads://trs-image-trs-qemuarm64.rootfs.wic
+      firmware:
+        image_arg: -drive if=pflash,unit=0,readonly=off,file={firmware},format=raw
+        url: downloads://flash.bin-qemu
+
+- boot:
+    method: qemu
+    media: tmpfs
+    docker:
+      image: registry.gitlab.com/linaro/blueprints/qemu-swtpm
+      binary: /usr/local/bin/qemu-system-aarch64-swtpm
+    expect_shell: false
+    timeout:
+      minutes: 40
+    auto_login:
+      login_prompt: 'login:'
+      username: "root"
+    prompts:
+      - ewaol@(.*):[/~]\$
+      - root@(.*):[/~]#
+
+
+
+
+- test:
+    timeout:
+      minutes: 1
+      skip: false
+    interactive:
+    - name: dump-devicetree
+      prompts:
+        - ewaol@(.*):[/~]\$
+        - root@(.*):[/~]#
+        - "ledge-qemuarm:"
+      echo: discard
+      script:
+      - name: dump-devicetree
+        command: 'dtc -I fs -O dts /sys/firmware/devicetree/base'
+
+- test:
+    timeout:
+      minutes: 5
+      skip: false
+    interactive:
+    - name: wait-is-system-running
+      prompts:
+        - ewaol@(.*):[/~]\$
+        - root@(.*):[/~]#
+        - "ledge-qemuarm:"
+      echo: discard
+      script:
+      - name: run-is-system-running
+        command: 'systemctl is-system-running --wait || SYSTEMD_COLORS=0 systemctl list-units --state=failed --no-pager'
+
+
+
+# report metrics for first boot
+- test:
+    timeout:
+      minutes: 5
+    definitions:
+    - repository:
+        metadata:
+          format: Lava-Test Test Definition 1.0
+          name: systemd-report-boot-time
+          description: "Report systemd boot-time"
+        run:
+          steps:
+          - lava-report-systemd-metrics.sh
+      from: inline
+      name: systemd-metrics-first-boot
+      path: systemd-metrics-first-boot
+
+# trigger and wait for reboot
+- test:
+    timeout:
+      minutes: 5
+      skip: false
+    interactive:
+    - name: reboot
+      prompts:
+        - root@(.*):[/~]#
+      echo: discard
+      script:
+      - name: reboot-for-second-measurement
+        command: 'reboot'
+- boot:
+    timeout:
+      minutes: 20
+    method: minimal
+    reset: false
+    auto_login:
+      login_prompt: 'login:'
+      username: "root"
+      login_commands:
+        - sudo su -
+    prompts:
+      - .*root@(.*):[/~]#
+
+# report metrics for second boot
+- test:
+    timeout:
+      minutes: 5
+    definitions:
+    - repository:
+        metadata:
+          format: Lava-Test Test Definition 1.0
+          name: systemd-report-boot-time
+          description: "Report systemd boot-time"
+        run:
+          steps:
+          - lava-report-systemd-metrics.sh
+      from: inline
+      name: systemd-metrics-second-boot
+      path: systemd-metrics-second-boot
+
+
+
+- test:
+    timeout:
+      minutes: 5
+      skip: false
+    interactive:
+    - name: smoke-ls
+      prompts:
+        - ewaol@(.*):[/~]\$
+        - root@(.*):[/~]#
+        - "ledge-qemuarm:"
+      echo: discard
+      script:
+      - name: run-ls
+        command: "ls /"
+
+- test:
+    timeout:
+      minutes: 5
+      skip: false
+    definitions:
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: ping-lava-dispatcher-ip
+            description: "Validate DUT can ping to LAVA Dispatcher IP"
+            os:
+              - linux-any
+            scope:
+              - functional
+          run:
+            steps:
+              - bash -c 'N=0; while ! ping -c 1 ${LAVA_DISPATCHER_IP}; do ((N++)); [ $N -eq 60 ] && exit 1; sleep 1; done'
+        from: inline
+        path: ping-lava-dispatcher-ip
+        name: ping-lava-dispatcher-ip
+
+# Check Secure Boot is enabled
+- test:
+    timeout:
+      minutes: 5
+    definitions:
+      - repository: https://gitlab.com/Linaro/trustedsubstrate/lava-tests.git
+        from: git
+        path: definitions/secure-boot/secure-boot-enable.yaml
+        name: secure-boot-enabled
+
+- deploy:
+    # Must use a considerable timeout because Docker images can be big
+    timeout:
+      minutes: 20
+    to: downloads
+    images:
+      soafee_alpine:
+        url: https://people.linaro.org/~javier.tia/images/soafee/docker/soafee-alpine-v3.17.2-d74e625d9115.tar
+
+
+- test:
+    timeout:
+      minutes: 60
+    definitions:
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: soafee-test-suite
+            description: "Run the SOAFEE Test Suite"
+            os:
+              - linux-any
+            scope:
+              - functional
+          run:
+            steps:
+              - sudo -i soafee-test-suite-setup -m http://${LAVA_DISPATCHER_IP}/tmp/${LAVA_JOB_ID}/downloads/common run
+
+              - sudo -i -u ewaol soafee-test-suite run -r -t -T --filter-tags soafee | tee -a soafee-test-suite-result.txt
+
+              - tap2lava soafee-test-suite-result.txt
+        from: inline
+        path: soafee-test-suite
+        name: soafee-test-suite
+
+# OP-TEE test suite
+- test:
+    timeout:
+      minutes: 60
+    definitions:
+    - repository: https://github.com/linaro/test-definitions.git
+      from: git
+      path: automated/linux/optee/optee-xtest.yaml
+      name: xtest
+
+# checking pcr8 value and rebooting
+- test:
+    timeout:
+      minutes: 15
+      skip: false
+    interactive:
+    - name: measured-boot
+      prompts: [".*root@(.*):[/~]#"]
+      echo: discard
+      script:
+      - command: # wait for the prompt
+      - name: check-LUKS-encryption-successful
+        command: "blkid"
+        successes:
+        - message: "LUKS"
+      - name: check-tpm-eventlog
+        command: "tpm2_eventlog /sys/kernel/security/tpm0/binary_bios_measurements | grep 'Exit Boot Services Returned with Success'"
+        successes:
+        - message: "Exit Boot Services Returned with Success"
+      - name: show-pcr8
+        command: "tpm2_pcrread sha256:8"
+        successes:
+        - message: "sha256:"
+      - command: "tpm2_pcrread sha256:8 > oPCR8.txt"
+    - name: measured-boot-reboot
+      echo: discard
+      prompts: ["reboot: Restarting system"]
+      script:
+      - command: "reboot"
+
+- test:
+    timeout:
+      minutes: 15
+      skip: false
+    interactive:
+    - name: measured-boot
+      prompts: ["Hit any key to stop autoboot", "=> "]
+      script:
+      - command: # wait for prompt
+      - command: " " # hit a key to stop autoboot
+      - command: "mw.b $loadaddr a && tpm autostart && tpm pcr_extend 8 $loadaddr"
+    - name: measured-boot-reboot
+      prompts: ["Booting"]
+      script:
+      - command: "run bootcmd"
+
+# wait for boot to userspace
+- boot:
+    timeout:
+      minutes: 20
+    method: minimal
+    reset: false
+    auto_login:
+      login_prompt: 'login:'
+      username: "root"
+      login_commands:
+        - sudo su -
+    prompts:
+      - .*ewaol@(.*):[/~]\$
+      - .*root@(.*):[/~]#
+
+# booting with changed pcr8 value
+- test:
+    timeout:
+      minutes: 5
+      skip: true
+    interactive:
+    - name: measured-boot
+      prompts: [".*root@(.*):[/~]#"]
+      echo: discard
+      script:
+      - name: show-new-pcr8
+        command: "tpm2_pcrread sha256:8"
+      - command: "tpm2_pcrread sha256:8 > nPCR8.txt"
+    - name: measured-boot
+      prompts: ["oPCR8.txt nPCR8.txt differ"]
+      echo: discard
+      script:
+      - name: pcr8-compare
+        command: cmp oPCR8.txt nPCR8.txt && echo "PCR8 has not changed"
+
+# checking pcr7 value and rebooting
+- test:
+    timeout:
+      minutes: 15
+      skip: false
+    interactive:
+    - name: filesystem-encryption
+      prompts: ["root@(.*):[/~]#"]
+      echo: discard
+      script:
+      - name: read-pcr7
+        command: "tpm2_pcrread sha256:7"
+
+    - name: filesystem-encryption
+      echo: discard
+      prompts: ["reboot: Restarting system"]
+      script:
+      - command: "reboot"
+
+    - name: filesystem-encryption
+      echo: discard
+      prompts: ["Hit any key to stop autoboot", "=> "]
+      script:
+      - command: # wait for first prompt
+      - command: " " # hit enter to stop autoboot
+      - name: reset-pcr7
+        command: "mw.b $loadaddr a && tpm autostart && tpm pcr_extend 7 $loadaddr"
+
+    - name: filesystem-encryption
+      echo: discard
+      prompts: ["TPM Error"]
+      script:
+      - name: bad-pcr7-cause-kernel-panic
+        command: "run bootcmd"
+
+# wait for boot to userspace
+- boot:
+    timeout:
+      minutes: 20
+    method: minimal
+    reset: false
+    auto_login:
+      login_prompt: 'login:'
+      username: "root"
+      login_commands:
+        - sudo su -
+    prompts:
+      - .*ewaol@(.*):[/~]\$
+      - .*root@(.*):[/~]#
+
+# booting with bad pcr7 value and check that it's reset after unsuccesful reboot
+- test:
+    timeout:
+      minutes: 5
+      skip: true
+    interactive:
+    - name: filesystem-encryption
+      prompts:
+        - .*ewaol@(.*):[/~]\$
+        - .*root@(.*):[/~]#
+      echo: discard
+      script:
+      - name: pcr7-reset-on-reboot-after-panic
+        command: "tpm2_pcrread sha256:7"
+
