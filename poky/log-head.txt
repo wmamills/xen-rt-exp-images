@@ -1,0 +1,9 @@
+commit 954396a3f681e8608a3b3702887f1e8d27795de2
+Author: Bill Mills <bill.mills@linaro.org>
+Date:   Wed Apr 3 08:02:58 2024 -0400
+
+    poky: switch to master as of April 3
+    
+    The genericarm64 stuff should all be in master now.
+    
+    Signed-off-by: Bill Mills <bill.mills@linaro.org>
